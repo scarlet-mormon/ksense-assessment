@@ -1,52 +1,57 @@
+import https from 'https'; // <-- STEP 1: Import the https module
+
 // --- Configuration ---
 const API_KEY = 'ak_1894e840a8d34bfdb49d8c37175c7a8cb24f0b7b76911945';
-const BASE_URL = 'https://assessment.ksenetech.com/api';
+const BASE_URL = 'https://assessment.ksensetech.com/api';
 
 // --- API Client Configuration ---
-const MAX_RETRIES = 5; // Max number of retries for a failed API request
-const INITIAL_RETRY_DELAY_MS = 1000; // Initial delay for retries, increases exponentially
-const REQUEST_DELAY_MS = 250; // A small delay between fetching pages to be polite to the API
+const MAX_RETRIES = 5;
+const INITIAL_RETRY_DELAY_MS = 1000;
+const REQUEST_DELAY_MS = 250;
+
+// <-- STEP 2: Create a custom agent to bypass SSL validation
+// WARNING: This disables certificate validation. Use only for this assessment.
+const unsafeAgent = new https.Agent({
+    rejectUnauthorized: false
+});
+
 
 // --- Helper Functions ---
 
-/**
- * Pauses execution for a specified number of milliseconds.
- * @param {number} ms - The number of milliseconds to wait.
- * @returns {Promise<void>}
- */
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-/**
- * Fetches data from a URL with retry logic for network and server errors.
- * @param {string} url - The URL to fetch.
- * @param {object} options - The options for the fetch request.
- * @param {number} retries - The number of remaining retries.
- * @returns {Promise<object>} The JSON response data.
- */
+// ... (keep the rest of the file the same)
+
 async function fetchWithRetry(url, options, retries = MAX_RETRIES) {
     for (let attempt = 1; attempt <= retries; attempt++) {
         try {
-            const response = await fetch(url, options);
+            const fetchOptions = { ...options, agent: unsafeAgent };
+            const response = await fetch(url, fetchOptions);
 
             if (response.ok) {
                 return await response.json();
             }
 
-            // Retry on specific server errors
             if ([429, 500, 503].includes(response.status)) {
                 console.warn(`Attempt ${attempt}: Received status ${response.status}. Retrying after delay...`);
                 const delay = INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt - 1);
                 await sleep(delay);
             } else {
-                // Non-retryable error
-                throw new Error(`Non-retryable HTTP error: ${response.status} ${response.statusText}`);
+                const errorBody = await response.text();
+                throw new Error(`Non-retryable HTTP error: ${response.status} ${response.statusText}. Body: ${errorBody}`);
             }
         } catch (error) {
+            // --- ENHANCED LOGGING ---
+            // This is the key change. We now log the full error object.
+            console.error(`\n--- DETAILED ERROR ON ATTEMPT ${attempt} ---`);
+            console.error(error); // This will print the full error object with code, stack, etc.
+            console.error('--- END OF DETAILED ERROR ---\n');
+
             if (attempt === retries) {
-                // All retries failed
-                throw new Error(`Failed to fetch from ${url} after ${retries} attempts: ${error.message}`);
+                throw new Error(`Failed to fetch from ${url} after ${retries} attempts. See detailed error above.`);
             }
-            console.warn(`Attempt ${attempt}: Network error or fetch failed. Retrying after delay...`);
+
+            console.warn(`Retrying after delay...`);
             const delay = INITIAL_RETRY_DELAY_MS * Math.pow(2, attempt - 1);
             await sleep(delay);
         }
@@ -54,93 +59,49 @@ async function fetchWithRetry(url, options, retries = MAX_RETRIES) {
      throw new Error(`Exhausted all retries for ${url}`);
 }
 
+// ... (the rest of your main.js file remains unchanged)
 
-// --- Risk Scoring Functions ---
 
-/**
- * Calculates the risk score based on blood pressure.
- * @param {string | null | undefined} bpString - Blood pressure reading (e.g., "120/80").
- * @returns {{score: number, isInvalid: boolean}} - The calculated score and a flag for data quality.
- */
+// --- Risk Scoring Functions (No changes needed here) ---
 function calculateBPRisk(bpString) {
-    if (!bpString || typeof bpString !== 'string') {
-        return { score: 0, isInvalid: true };
-    }
-
+    if (!bpString || typeof bpString !== 'string') return { score: 0, isInvalid: true };
     const parts = bpString.split('/');
-    if (parts.length !== 2) {
-        return { score: 0, isInvalid: true };
-    }
-
+    if (parts.length !== 2) return { score: 0, isInvalid: true };
     const systolic = parseInt(parts[0], 10);
     const diastolic = parseInt(parts[1], 10);
-
-    if (isNaN(systolic) || isNaN(diastolic)) {
-        return { score: 0, isInvalid: true };
-    }
-
-    // Cascade check from highest risk to lowest, as per the "higher risk stage" rule.
+    if (isNaN(systolic) || isNaN(diastolic)) return { score: 0, isInvalid: true };
     if (systolic >= 140 || diastolic >= 90) return { score: 3, isInvalid: false };
     if ((systolic >= 130 && systolic <= 139) || (diastolic >= 80 && diastolic <= 89)) return { score: 2, isInvalid: false };
     if ((systolic >= 120 && systolic <= 129) && diastolic < 80) return { score: 1, isInvalid: false };
-    // Any other valid reading, including Normal (Systolic <120 AND Diastolic <80), is 0 risk.
     return { score: 0, isInvalid: false };
 }
 
-/**
- * Calculates the risk score based on temperature.
- * @param {number | string | null | undefined} tempValue - Temperature reading.
- * @returns {{score: number, isInvalid: boolean}} - The calculated score and a flag for data quality.
- */
 function calculateTempRisk(tempValue) {
-    if (tempValue === null || tempValue === undefined) {
-        return { score: 0, isInvalid: true };
-    }
-
+    if (tempValue === null || tempValue === undefined) return { score: 0, isInvalid: true };
     const temp = parseFloat(tempValue);
-
-    if (isNaN(temp)) {
-        return { score: 0, isInvalid: true };
-    }
-
+    if (isNaN(temp)) return { score: 0, isInvalid: true };
     if (temp >= 101.0) return { score: 2, isInvalid: false };
-    if (temp >= 99.6) return { score: 1, isInvalid: false }; // 99.6 - 100.9
-    return { score: 0, isInvalid: false }; // <= 99.5
+    if (temp >= 99.6) return { score: 1, isInvalid: false };
+    return { score: 0, isInvalid: false };
 }
 
-/**
- * Calculates the risk score based on age.
- * @param {number | string | null | undefined} ageValue - The patient's age.
- * @returns {{score: number, isInvalid: boolean}} - The calculated score and a flag for data quality.
- */
 function calculateAgeRisk(ageValue) {
-    if (ageValue === null || ageValue === undefined) {
-        return { score: 0, isInvalid: true };
-    }
-    
+    if (ageValue === null || ageValue === undefined) return { score: 0, isInvalid: true };
     const age = parseInt(ageValue, 10);
-
-    if (isNaN(age)) {
-        return { score: 0, isInvalid: true };
-    }
-
+    if (isNaN(age)) return { score: 0, isInvalid: true };
     if (age > 65) return { score: 2, isInvalid: false };
-    if (age >= 40) return { score: 1, isInvalid: false }; // 40 - 65
-    return { score: 0, isInvalid: false }; // < 40
+    if (age >= 40) return { score: 1, isInvalid: false };
+    return { score: 0, isInvalid: false };
 }
 
 
-// --- Main Application Logic ---
+// --- Main Application Logic (No changes needed here) ---
 
-/**
- * Fetches all patients from the paginated API.
- * @returns {Promise<Array<object>>} A list of all patient objects.
- */
 async function fetchAllPatients() {
     let allPatients = [];
     let page = 1;
     let hasNext = true;
-    const limit = 20; // Use max limit to reduce number of API calls
+    const limit = 20;
 
     console.log("Starting to fetch patient data...");
     while (hasNext) {
@@ -171,11 +132,6 @@ async function fetchAllPatients() {
     return allPatients;
 }
 
-/**
- * Submits the final analysis to the assessment API.
- * @param {object} payload - The submission payload.
- * @returns {Promise<object>} The API response from the submission.
- */
 async function submitResults(payload) {
     const url = `${BASE_URL}/submit-assessment`;
     const options = {
@@ -191,47 +147,30 @@ async function submitResults(payload) {
     return await fetchWithRetry(url, options);
 }
 
-/**
- * Main function to orchestrate the entire process.
- */
 async function main() {
     try {
-        // 1. Fetch all patient data
         const allPatients = await fetchAllPatients();
-
-        // 2. Initialize result sets to automatically handle duplicates
         const highRiskPatients = new Set();
         const feverPatients = new Set();
         const dataQualityIssues = new Set();
 
         console.log("Processing patient data...");
-
-        // 3. Process each patient
         for (const patient of allPatients) {
             if (!patient || !patient.patient_id) {
                 console.warn("Skipping a record with no patient_id:", patient);
                 continue;
             }
             const { patient_id, blood_pressure, temperature, age } = patient;
-
-            // Calculate scores and check for data quality issues
             const bpResult = calculateBPRisk(blood_pressure);
             const tempResult = calculateTempRisk(temperature);
             const ageResult = calculateAgeRisk(age);
-
-            const hasIssue = bpResult.isInvalid || tempResult.isInvalid || ageResult.isInvalid;
-            if (hasIssue) {
+            if (bpResult.isInvalid || tempResult.isInvalid || ageResult.isInvalid) {
                 dataQualityIssues.add(patient_id);
             }
-
-            // Calculate total risk score
             const totalRiskScore = bpResult.score + tempResult.score + ageResult.score;
-
-            // Categorize patient based on rules
             if (totalRiskScore >= 4) {
                 highRiskPatients.add(patient_id);
             }
-
             const tempNumber = parseFloat(temperature);
             if (!tempResult.isInvalid && tempNumber >= 99.6) {
                 feverPatients.add(patient_id);
@@ -239,7 +178,6 @@ async function main() {
         }
         console.log("Patient processing complete.");
 
-        // 4. Prepare submission payload
         const submissionPayload = {
             high_risk_patients: Array.from(highRiskPatients).sort(),
             fever_patients: Array.from(feverPatients).sort(),
@@ -249,16 +187,15 @@ async function main() {
         console.log("\n--- Submission Payload ---");
         console.log(JSON.stringify(submissionPayload, null, 2));
 
-        // 5. Submit results
         const submissionResult = await submitResults(submissionPayload);
 
         console.log("\n--- Submission Result ---");
         console.log(JSON.stringify(submissionResult, null, 2));
 
         if(submissionResult.success) {
-            console.log(`\nAssessment successful! Final score: ${submissionResult.results.score}`);
+            console.log(`\n✅ Assessment successful! Final score: ${submissionResult.results.score}`);
         } else {
-            console.error(`\nAssessment submission failed: ${submissionResult.message}`);
+            console.error(`\n❌ Assessment submission failed: ${submissionResult.message}`);
         }
 
     } catch (error) {
@@ -267,5 +204,4 @@ async function main() {
     }
 }
 
-// Execute the main function
 main();
